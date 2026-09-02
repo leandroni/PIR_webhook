@@ -64,12 +64,14 @@ A self-contained sketch for a NodeMCU + PIR sensor that:
 2. Under **PIR / Trigger settings**:
    - Choose which pin the PIR is wired to (defaults to **D0**).
    - Enter the **Trigger URL** to call when motion is detected, e.g. `http://homeassistant.local:8123/api/webhook/...` or any HTTP/HTTPS endpoint.
+   - Choose the **HTTP method** to use for that call: `GET`, `POST`, `PUT`, or `PATCH` (defaults to `GET`).
+   - Set the **Cooldown between triggers (ms)** — the minimum gap enforced between two calls to the trigger URL (defaults to `5000`, i.e. 5 seconds). Set it lower for a more responsive sensor, or higher to reduce how often the URL gets hit.
 3. Click **Save Settings**. This applies immediately — no reboot needed.
 
 Now, whenever the PIR triggers:
-- The board sends an **HTTP GET** to your configured URL.
+- The board sends an HTTP request (using your configured method) to your configured URL, with no body.
 - The onboard LED flashes a few times.
-- There's a 5-second cooldown between triggers to avoid spamming the URL.
+- No further triggers fire until the configured cooldown has elapsed.
 
 ## 6. Resetting configuration
 

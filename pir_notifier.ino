@@ -8,9 +8,11 @@
       * Scan for WiFi networks and pick one, enter a password, save it
         (device then reboots and tries to connect).
       * Choose which pin the PIR sensor is wired to (default D0).
-      * Set a URL that gets called (HTTP GET) whenever the PIR triggers.
-  - When the PIR triggers: calls the configured URL and flashes the
-    onboard LED (D4 / GPIO2).
+      * Set a URL that gets called whenever the PIR triggers, which HTTP
+        method to use (GET/POST/PUT/PATCH), and the cooldown (in ms)
+        between triggers.
+  - When the PIR triggers: calls the configured URL with the configured
+    method and flashes the onboard LED (D4 / GPIO2).
 
   Libraries required (install via Arduino Library Manager):
       - ArduinoJson (by Benoit Blanchon), version 6.x
@@ -34,7 +36,7 @@
 #define BUTTON_PIN 0     // D3 - onboard FLASH button, used to reset config on boot
 #define CONFIG_FILE "/config.json"
 #define AP_SSID "PIR-Setup"          // open network name shown during setup
-#define TRIGGER_COOLDOWN_MS 5000     // minimum gap between two triggers
+#define DEFAULT_COOLDOWN_MS 5000     // default minimum gap between two triggers
 
 // ---------- pin name <-> GPIO map (NodeMCU silkscreen labels) ----------
 struct PinMap { const char *name; uint8_t gpio; };
@@ -51,6 +53,18 @@ String cfgSsid = "";
 String cfgPass = "";
 String cfgPirPin = "D0";
 String cfgTriggerUrl = "";
+String cfgTriggerMethod = "GET";           // GET, POST, PUT, or PATCH
+unsigned long cfgCooldownMs = DEFAULT_COOLDOWN_MS;
+
+const char *ALLOWED_METHODS[] = {"GET", "POST", "PUT", "PATCH"};
+const int ALLOWED_METHODS_SIZE = sizeof(ALLOWED_METHODS) / sizeof(ALLOWED_METHODS[0]);
+
+bool isAllowedMethod(const String &m) {
+  for (int i = 0; i < ALLOWED_METHODS_SIZE; i++) {
+    if (m == ALLOWED_METHODS[i]) return true;
+  }
+  return false;
+}
 
 bool staConnected = false;
 uint8_t pirGpio = 16;
@@ -60,6 +74,7 @@ int lastPirState = LOW;
 // ---------------- config load/save ----------------
 void loadConfig() {
   cfgSsid = ""; cfgPass = ""; cfgPirPin = "D0"; cfgTriggerUrl = "";
+  cfgTriggerMethod = "GET"; cfgCooldownMs = DEFAULT_COOLDOWN_MS;
   if (!LittleFS.exists(CONFIG_FILE)) return;
   File f = LittleFS.open(CONFIG_FILE, "r");
   if (!f) return;
@@ -67,10 +82,13 @@ void loadConfig() {
   DeserializationError err = deserializeJson(doc, f);
   f.close();
   if (err) return;
-  cfgSsid       = doc["ssid"]        | "";
-  cfgPass       = doc["pass"]        | "";
-  cfgPirPin     = doc["pir_pin"]     | "D0";
-  cfgTriggerUrl = doc["trigger_url"] | "";
+  cfgSsid          = doc["ssid"]           | "";
+  cfgPass          = doc["pass"]           | "";
+  cfgPirPin        = doc["pir_pin"]        | "D0";
+  cfgTriggerUrl    = doc["trigger_url"]    | "";
+  cfgTriggerMethod = doc["trigger_method"] | "GET";
+  cfgCooldownMs    = doc["cooldown_ms"]    | DEFAULT_COOLDOWN_MS;
+  if (!isAllowedMethod(cfgTriggerMethod)) cfgTriggerMethod = "GET";
 }
 
 void saveConfig() {
@@ -79,6 +97,8 @@ void saveConfig() {
   doc["pass"] = cfgPass;
   doc["pir_pin"] = cfgPirPin;
   doc["trigger_url"] = cfgTriggerUrl;
+  doc["trigger_method"] = cfgTriggerMethod;
+  doc["cooldown_ms"] = cfgCooldownMs;
   File f = LittleFS.open(CONFIG_FILE, "w");
   if (!f) return;
   serializeJson(doc, f);
@@ -140,11 +160,24 @@ String htmlPage() {
   }
   html += F(
     "</select>"
-    "<label>Trigger URL (called with HTTP GET on motion, e.g. http://host/trigger)</label>"
+    "<label>Trigger URL (called on motion, e.g. http://host/trigger)</label>"
     "<input type='text' name='trigger_url' value='");
   html += cfgTriggerUrl;
   html += F(
     "' placeholder='http://...'>"
+    "<label>HTTP method</label><select name='trigger_method'>");
+  for (int i = 0; i < ALLOWED_METHODS_SIZE; i++) {
+    html += "<option value='" + String(ALLOWED_METHODS[i]) + "'";
+    if (cfgTriggerMethod == ALLOWED_METHODS[i]) html += " selected";
+    html += ">" + String(ALLOWED_METHODS[i]) + "</option>";
+  }
+  html += F(
+    "</select>"
+    "<label>Cooldown between triggers (ms)</label>"
+    "<input type='number' name='cooldown_ms' min='0' step='100' value='");
+  html += String(cfgCooldownMs);
+  html += F(
+    "'>"
     "<button type='submit'>Save Settings</button>"
     "</form>");
 
@@ -197,6 +230,16 @@ void handleSaveWifi() {
 void handleSaveConfig() {
   if (server.hasArg("pir_pin")) cfgPirPin = server.arg("pir_pin");
   if (server.hasArg("trigger_url")) cfgTriggerUrl = server.arg("trigger_url");
+  if (server.hasArg("trigger_method")) {
+    String m = server.arg("trigger_method");
+    m.toUpperCase();
+    if (isAllowedMethod(m)) cfgTriggerMethod = m;
+  }
+  if (server.hasArg("cooldown_ms")) {
+    long v = server.arg("cooldown_ms").toInt();
+    if (v < 0) v = 0;
+    cfgCooldownMs = (unsigned long)v;
+  }
   saveConfig();
   pirGpio = gpioForName(cfgPirPin);
   pinMode(pirGpio, INPUT);
@@ -230,7 +273,7 @@ void callTriggerUrl() {
   }
 
   if (ok) {
-    http.GET();
+    http.sendRequest(cfgTriggerMethod.c_str());
     http.end();
   }
 }
@@ -239,7 +282,7 @@ void checkPir() {
   if (WiFi.status() != WL_CONNECTED) return; // need WiFi to call the URL
   int state = digitalRead(pirGpio);
   unsigned long now = millis();
-  if (state == HIGH && lastPirState == LOW && (now - lastTrigger > TRIGGER_COOLDOWN_MS)) {
+  if (state == HIGH && lastPirState == LOW && (now - lastTrigger > cfgCooldownMs)) {
     lastTrigger = now;
     callTriggerUrl();
     flashLed();
